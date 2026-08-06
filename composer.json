@@ -1,0 +1,15 @@
+{
+    "name": "clarityweb/social-insights",
+    "type": "wordpress-plugin",
+    "license": "GPL-2.0-or-later",
+    "require": {
+        "php": ">=8.2"
+    },
+    "scripts": {
+        "test": "php tests/run.php",
+        "lint": "find . -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l"
+    },
+    "scripts-descriptions": {
+        "test": "Dependency-free checks. Runs anywhere PHP runs, including on a server."
+    }
+}
