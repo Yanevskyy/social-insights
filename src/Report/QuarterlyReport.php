@@ -55,6 +55,26 @@ final class QuarterlyReport
 
         $table = Plugin::table();
 
+        // The range is validated before anything is counted.
+        //
+        // Without this, a reversed range produced "0 of -90 days have no data",
+        // and an unparseable date silently became a one day period. Both put a
+        // meaningless figure in a report that a public body would publish, and
+        // a nonsense number is worse than a refusal.
+        $startTime = strtotime($start);
+        $endTime   = strtotime($end);
+
+        if ($startTime === false || $endTime === false) {
+            return self::emptyResult($start, $end, __('The reporting period is not a valid date range.', 'social-insights'));
+        }
+
+        if ($endTime < $startTime) {
+            // Swapping is safer than failing here: the caller clearly meant a
+            // period, and the two dates define it whichever way round they came.
+            [$start, $end]         = [$end, $start];
+            [$startTime, $endTime] = [$endTime, $startTime];
+        }
+
         $rows = $wpdb->get_results(
             $wpdb->prepare(
                 "SELECT channel, metric, metric_label,
@@ -71,7 +91,7 @@ final class QuarterlyReport
             ARRAY_A
         );
 
-        $expectedDays = (int) ((strtotime($end) - strtotime($start)) / DAY_IN_SECONDS) + 1;
+        $expectedDays = (int) (($endTime - $startTime) / DAY_IN_SECONDS) + 1;
         $channels     = [];
 
         foreach ((array) $rows as $row) {
@@ -119,6 +139,27 @@ final class QuarterlyReport
             'expected_days' => $expectedDays,
             'channels'      => $channels,
             'comparison'    => $comparison,
+            'generated_at'  => current_time('mysql', true),
+        ];
+    }
+
+    /**
+     * Result for a period that cannot be reported on.
+     *
+     * Carries the reason rather than looking like a quiet quarter with no
+     * activity. Those are different facts and the report must not conflate them.
+     *
+     * @return array<string,mixed>
+     */
+    private static function emptyResult(string $start, string $end, string $reason): array
+    {
+        return [
+            'start'         => $start,
+            'end'           => $end,
+            'expected_days' => 0,
+            'channels'      => [],
+            'comparison'    => null,
+            'error'         => $reason,
             'generated_at'  => current_time('mysql', true),
         ];
     }
@@ -188,6 +229,12 @@ final class QuarterlyReport
         $lines[] = sprintf('Social media report: %s to %s', $report['start'], $report['end']);
         $lines[] = str_repeat('=', 48);
         $lines[] = '';
+
+        if (!empty($report['error'])) {
+            $lines[] = (string) $report['error'];
+
+            return implode("\n", $lines);
+        }
 
         if ($report['channels'] === []) {
             $lines[] = 'No data was collected for this period.';
