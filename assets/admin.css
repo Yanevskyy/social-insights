@@ -1,0 +1,74 @@
+/**
+ * Social Insights dashboard.
+ *
+ * Channel state and direction of change are carried by words as well as
+ * colour, so the screen still reads correctly in greyscale or for a colour
+ * blind viewer.
+ */
+
+.si-channels {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+}
+
+.si-channel {
+    padding: 14px 16px;
+    border: 1px solid #c3c4c7;
+    border-left-width: 4px;
+    border-radius: 4px;
+    background: #fff;
+}
+
+.si-channel h3 {
+    margin: 0 0 4px;
+    font-size: 14px;
+}
+
+.si-channel p {
+    margin: 0;
+    color: #50575e;
+    font-size: 13px;
+}
+
+.si-channel--on  { border-left-color: #00a32a; }
+.si-channel--off { border-left-color: #a7aaad; }
+
+.si-channel-title {
+    margin: 22px 0 6px;
+    font-size: 15px;
+    text-transform: capitalize;
+}
+
+.si-gap {
+    padding: 8px 12px;
+    border-left: 4px solid #dba617;
+    background: #fdf6e3;
+    color: #6b4b00;
+    font-size: 13px;
+}
+
+.si-change {
+    font-weight: 700;
+}
+
+.si-change--up   { color: #00733b; }
+.si-change--down { color: #b32d2e; }
+
+.si-dash {
+    color: #787c82;
+    font-size: 12px;
+}
+
+.si-textreport {
+    width: 100%;
+    max-width: 780px;
+    padding: 12px;
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+    background: #fbfbfc;
+    font-family: Consolas, Monaco, monospace;
+    font-size: 12px;
+    line-height: 1.55;
+}
