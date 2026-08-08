@@ -14,6 +14,7 @@ declare(strict_types=1);
 namespace ClarityWeb\SocialInsights\Admin;
 
 use ClarityWeb\SocialInsights\Plugin;
+use ClarityWeb\SocialInsights\Provider\ProviderUnavailable;
 use ClarityWeb\SocialInsights\Report\QuarterlyReport;
 
 defined('ABSPATH') || exit;
@@ -22,6 +23,12 @@ final class DashboardPage
 {
     public const SLUG  = 'social-insights';
     private const NONCE = 'si_settings';
+
+    /** Post lists are cached for an hour; refreshing is an explicit action. */
+    private const POSTS_TRANSIENT = 'si_recent_posts';
+
+    /** Enough to see what worked, short enough to read at a glance. */
+    private const POSTS_SHOWN = 10;
 
     public static function addMenu(): void
     {
@@ -81,6 +88,161 @@ final class DashboardPage
         exit;
     }
 
+    /**
+     * Drops the cached post list so the next page load fetches it again.
+     *
+     * Refreshing is a deliberate action rather than something that happens on
+     * every page load. Three social APIs queried on each visit would make this
+     * screen as slow as the slowest of them and would spend the rate limit on
+     * people who only came to read the quarterly figures.
+     */
+    public static function handleRefreshPosts(): void
+    {
+        if (!current_user_can('edit_others_posts')) {
+            wp_die(esc_html__('You do not have permission to do that.', 'social-insights'));
+        }
+
+        check_admin_referer(self::NONCE . '_posts');
+
+        delete_transient(self::POSTS_TRANSIENT);
+
+        wp_safe_redirect(add_query_arg('refreshed', '1', menu_page_url(self::SLUG, false)));
+        exit;
+    }
+
+    /**
+     * Posts for the current quarter, one entry per channel.
+     *
+     * Each channel is fetched separately and its failure is recorded rather
+     * than thrown, so one dead token does not blank the whole section. An
+     * unreachable channel says so; it never falls back to older numbers
+     * presented as current ones.
+     *
+     * @return array<int,array{label:string,posts:array<int,array<string,mixed>>,error:?string}>
+     */
+    private static function collectPosts(string $since, string $until): array
+    {
+        $cached = get_transient(self::POSTS_TRANSIENT);
+
+        if (is_array($cached) && ($cached['range'] ?? '') === $since . '/' . $until) {
+            return $cached['channels'];
+        }
+
+        $channels = [];
+
+        foreach (Plugin::instance()->providers() as $provider) {
+            if (!$provider->isConfigured()) {
+                $channels[] = [
+                    'label' => $provider->label(),
+                    'posts' => [],
+                    'error' => __('Not connected.', 'social-insights'),
+                ];
+
+                continue;
+            }
+
+            try {
+                $posts = $provider->posts($since, $until);
+            } catch (ProviderUnavailable $error) {
+                $channels[] = [
+                    'label' => $provider->label(),
+                    'posts' => [],
+                    'error' => $error->getMessage(),
+                ];
+
+                continue;
+            }
+
+            usort(
+                $posts,
+                static fn(array $a, array $b): int => (int) $b['engagement'] <=> (int) $a['engagement']
+            );
+
+            $channels[] = [
+                'label' => $provider->label(),
+                'posts' => array_slice($posts, 0, self::POSTS_SHOWN),
+                'error' => null,
+            ];
+        }
+
+        set_transient(
+            self::POSTS_TRANSIENT,
+            ['range' => $since . '/' . $until, 'channels' => $channels],
+            HOUR_IN_SECONDS
+        );
+
+        return $channels;
+    }
+
+    /**
+     * @param array<int,array{label:string,posts:array<int,array<string,mixed>>,error:?string}> $channels
+     */
+    private static function renderPosts(array $channels): void
+    {
+        foreach ($channels as $channel) {
+            printf('<h3>%s</h3>', esc_html($channel['label']));
+
+            if ($channel['error'] !== null) {
+                printf(
+                    '<div class="notice notice-warning inline"><p>%s</p></div>',
+                    esc_html($channel['error'])
+                );
+
+                continue;
+            }
+
+            if ($channel['posts'] === []) {
+                printf(
+                    '<p class="description">%s</p>',
+                    esc_html__('No posts published in this period.', 'social-insights')
+                );
+
+                continue;
+            }
+
+            echo '<table class="wp-list-table widefat fixed striped si-posts"><thead><tr>';
+            printf('<th scope="col">%s</th>', esc_html__('Published', 'social-insights'));
+            printf('<th scope="col">%s</th>', esc_html__('Post', 'social-insights'));
+            printf('<th scope="col" class="si-posts__number">%s</th>', esc_html__('Engagement', 'social-insights'));
+            echo '</tr></thead><tbody>';
+
+            foreach ($channel['posts'] as $post) {
+                $published = strtotime((string) $post['published']);
+                $text      = trim((string) $post['text']);
+
+                echo '<tr>';
+
+                printf(
+                    '<td class="si-posts__date">%s</td>',
+                    esc_html($published ? wp_date(get_option('date_format'), $published) : '')
+                );
+
+                // An empty caption is normal on an image post, so the row says
+                // so rather than showing a blank cell that reads as a bug.
+                $label = $text !== '' ? $text : __('(no caption)', 'social-insights');
+
+                if ($post['url'] !== '') {
+                    printf(
+                        '<td><a href="%s" target="_blank" rel="noopener noreferrer">%s</a></td>',
+                        esc_url((string) $post['url']),
+                        esc_html($label)
+                    );
+                } else {
+                    printf('<td>%s</td>', esc_html($label));
+                }
+
+                printf(
+                    '<td class="si-posts__number">%s</td>',
+                    esc_html(number_format_i18n((int) $post['engagement']))
+                );
+
+                echo '</tr>';
+            }
+
+            echo '</tbody></table>';
+        }
+    }
+
     public static function render(): void
     {
         if (!current_user_can('edit_others_posts')) {
@@ -97,6 +259,10 @@ final class DashboardPage
 
             <?php if (isset($_GET['saved'])) : ?>
                 <div class="notice notice-success is-dismissible"><p><?php esc_html_e('Settings saved.', 'social-insights'); ?></p></div>
+            <?php endif; ?>
+
+            <?php if (isset($_GET['refreshed'])) : ?>
+                <div class="notice notice-success is-dismissible"><p><?php esc_html_e('Post list refreshed.', 'social-insights'); ?></p></div>
             <?php endif; ?>
 
             <?php if (isset($_GET['collected'])) : ?>
@@ -120,6 +286,20 @@ final class DashboardPage
             </p>
 
             <?php self::renderReport($report); ?>
+
+            <h2 class="title"><?php esc_html_e('Posts in this quarter', 'social-insights'); ?></h2>
+            <p class="description">
+                <?php esc_html_e('The best performing posts on each channel, most engaged first. Engagement counts are taken from each platform as it reports them and are not compared across platforms.', 'social-insights'); ?>
+            </p>
+
+            <?php self::renderPosts(self::collectPosts($bounds['start'], $bounds['end'])); ?>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:12px 0">
+                <input type="hidden" name="action" value="si_refresh_posts">
+                <?php wp_nonce_field(self::NONCE . '_posts'); ?>
+                <button type="submit" class="button"><?php esc_html_e('Refresh posts', 'social-insights'); ?></button>
+                <span class="description"><?php esc_html_e('Cached for an hour to keep the page fast and stay inside the API rate limits.', 'social-insights'); ?></span>
+            </form>
 
             <h2 class="title"><?php esc_html_e('Plain text version', 'social-insights'); ?></h2>
             <p class="description"><?php esc_html_e('Ready to paste into a document or an email.', 'social-insights'); ?></p>

@@ -120,14 +120,85 @@ final class LinkedInProvider implements SocialProvider
                 }
             }
 
+            $id = (string) ($item['id'] ?? '');
+
             $posts[] = [
-                'id'          => (string) ($item['id'] ?? ''),
-                'published'   => $created > 0 ? gmdate('Y-m-d H:i:s', (int) ($created / 1000)) : '',
-                'text'        => mb_substr((string) ($item['commentary'] ?? ''), 0, 160),
-                'url'         => '',
+                'id'        => $id,
+                'published' => $created > 0 ? gmdate('Y-m-d H:i:s', (int) ($created / 1000)) : '',
+                'text'      => mb_substr((string) ($item['commentary'] ?? ''), 0, 160),
+                // The permalink is not returned by the posts query. This is the
+                // documented format for a share urn and is stable, so it is
+                // built rather than left blank.
+                'url'         => $id !== '' ? 'https://www.linkedin.com/feed/update/' . $id : '',
                 'impressions' => 0,
                 'engagement'  => 0,
             ];
+        }
+
+        return self::withStatistics($posts);
+    }
+
+    /**
+     * Fills in per-post figures from the share statistics endpoint.
+     *
+     * LinkedIn splits this across two calls: the posts query returns the posts
+     * and no numbers, and the statistics query returns numbers keyed by share
+     * urn. Without the second call every row reads zero, which looks like a
+     * broken integration rather than the API's shape.
+     *
+     * A failure here degrades to the posts without their figures. Losing the
+     * engagement column is a smaller loss than losing the list.
+     *
+     * @param array<int,array<string,mixed>> $posts
+     * @return array<int,array<string,mixed>>
+     */
+    private function withStatistics(array $posts): array
+    {
+        if ($posts === []) {
+            return $posts;
+        }
+
+        $query = [
+            'q'                   => 'organizationalEntity',
+            'organizationalEntity' => 'urn:li:organization:' . $this->organisationId,
+        ];
+
+        foreach (array_values($posts) as $index => $post) {
+            $query["shares[{$index}]"] = $post['id'];
+        }
+
+        try {
+            $data = $this->get('/rest/organizationalEntityShareStatistics', $query);
+        } catch (ProviderUnavailable) {
+            return $posts;
+        }
+
+        $byShare = [];
+
+        foreach ($data['elements'] ?? [] as $element) {
+            $share = (string) ($element['share'] ?? '');
+
+            if ($share === '') {
+                continue;
+            }
+
+            $stats = $element['totalShareStatistics'] ?? [];
+
+            $byShare[$share] = [
+                'impressions' => (int) ($stats['impressionCount'] ?? 0),
+                'engagement'  => (int) ($stats['likeCount'] ?? 0)
+                    + (int) ($stats['commentCount'] ?? 0)
+                    + (int) ($stats['shareCount'] ?? 0),
+            ];
+        }
+
+        foreach ($posts as $index => $post) {
+            $figures = $byShare[$post['id']] ?? null;
+
+            if ($figures !== null) {
+                $posts[$index]['impressions'] = $figures['impressions'];
+                $posts[$index]['engagement']  = $figures['engagement'];
+            }
         }
 
         return $posts;

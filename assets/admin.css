@@ -72,3 +72,18 @@
     font-size: 12px;
     line-height: 1.55;
 }
+
+/* Post listing ---------------------------------------------------------- */
+
+.si-posts {
+    margin-bottom: 20px;
+}
+
+.si-posts__date {
+    width: 130px;
+}
+
+.si-posts__number {
+    width: 120px;
+    text-align: right;
+}

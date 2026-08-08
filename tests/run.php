@@ -142,4 +142,168 @@ TestRunner::same('a full quarter has no gap', 0, gapDays(92, 92));
 TestRunner::same('a partial quarter reports the gap', 62, gapDays(92, 30));
 TestRunner::same('more data than days cannot make the gap negative', 0, gapDays(92, 100));
 
+// ---------------------------------------------------------------------------
+// Engagement, whichever shape the platform sends
+// ---------------------------------------------------------------------------
+
+TestRunner::group('Engagement parsing');
+
+/**
+ * Mirrors MetaProvider::engagementOf. Instagram media carry flat counts, Page
+ * posts carry summary totals, and only Pages have shares.
+ *
+ * @param array<string,mixed> $item
+ */
+function engagementOf(array $item): int
+{
+    $likes = isset($item['like_count'])
+        ? (int) $item['like_count']
+        : (int) ($item['reactions']['summary']['total_count'] ?? 0);
+
+    $comments = isset($item['comments_count'])
+        ? (int) $item['comments_count']
+        : (int) ($item['comments']['summary']['total_count'] ?? 0);
+
+    return $likes + $comments + (int) ($item['shares']['count'] ?? 0);
+}
+
+TestRunner::same(
+    'Instagram flat counts are added',
+    205,
+    engagementOf(['like_count' => 184, 'comments_count' => 21])
+);
+
+TestRunner::same(
+    'Page summary totals are added, with shares',
+    386,
+    engagementOf([
+        'reactions' => ['summary' => ['total_count' => 312]],
+        'comments'  => ['summary' => ['total_count' => 47]],
+        'shares'    => ['count' => 27],
+    ])
+);
+
+TestRunner::same(
+    'a post with no engagement reads as zero, not as missing',
+    0,
+    engagementOf(['id' => '123'])
+);
+
+TestRunner::same(
+    'a flat count of zero is preferred over an absent summary',
+    0,
+    engagementOf(['like_count' => 0, 'comments_count' => 0])
+);
+
+TestRunner::same(
+    'the two shapes never double count',
+    100,
+    engagementOf([
+        'like_count' => 100,
+        'reactions'  => ['summary' => ['total_count' => 999]],
+    ])
+);
+
+// ---------------------------------------------------------------------------
+// Per-share statistics, keyed by urn
+// ---------------------------------------------------------------------------
+
+TestRunner::group('LinkedIn share statistics');
+
+/**
+ * Mirrors LinkedInProvider::withStatistics. LinkedIn returns posts and their
+ * figures from two separate calls, joined on the share urn.
+ *
+ * @param array<int,array<string,mixed>> $posts
+ * @param array<int,array<string,mixed>> $elements
+ * @return array<int,array<string,mixed>>
+ */
+function joinStatistics(array $posts, array $elements): array
+{
+    $byShare = [];
+
+    foreach ($elements as $element) {
+        $share = (string) ($element['share'] ?? '');
+
+        if ($share === '') {
+            continue;
+        }
+
+        $stats = $element['totalShareStatistics'] ?? [];
+
+        $byShare[$share] = (int) ($stats['likeCount'] ?? 0)
+            + (int) ($stats['commentCount'] ?? 0)
+            + (int) ($stats['shareCount'] ?? 0);
+    }
+
+    foreach ($posts as $index => $post) {
+        if (isset($byShare[$post['id']])) {
+            $posts[$index]['engagement'] = $byShare[$post['id']];
+        }
+    }
+
+    return $posts;
+}
+
+$joined = joinStatistics(
+    [
+        ['id' => 'urn:li:share:1', 'engagement' => 0],
+        ['id' => 'urn:li:share:2', 'engagement' => 0],
+    ],
+    [
+        ['share' => 'urn:li:share:1', 'totalShareStatistics' => ['likeCount' => 96, 'commentCount' => 14, 'shareCount' => 23]],
+        ['share' => 'urn:li:share:2', 'totalShareStatistics' => ['likeCount' => 58, 'commentCount' => 6, 'shareCount' => 11]],
+    ]
+);
+
+TestRunner::same('figures land on the right post', 133, $joined[0]['engagement']);
+TestRunner::same('the second post gets its own figures', 75, $joined[1]['engagement']);
+
+$partial = joinStatistics(
+    [['id' => 'urn:li:share:1', 'engagement' => 0], ['id' => 'urn:li:share:missing', 'engagement' => 0]],
+    [['share' => 'urn:li:share:1', 'totalShareStatistics' => ['likeCount' => 10]]]
+);
+
+TestRunner::same('a post with no statistics keeps zero', 0, $partial[1]['engagement']);
+TestRunner::same('a post with statistics is still filled', 10, $partial[0]['engagement']);
+
+TestRunner::same(
+    'an element with no share urn is ignored rather than guessed at',
+    0,
+    joinStatistics(
+        [['id' => 'urn:li:share:1', 'engagement' => 0]],
+        [['totalShareStatistics' => ['likeCount' => 500]]]
+    )[0]['engagement']
+);
+
+// ---------------------------------------------------------------------------
+// Post ordering
+// ---------------------------------------------------------------------------
+
+TestRunner::group('Post ordering');
+
+/**
+ * @param array<int,array<string,mixed>> $posts
+ * @return array<int,array<string,mixed>>
+ */
+function topPosts(array $posts, int $limit): array
+{
+    usort($posts, static fn(array $a, array $b): int => (int) $b['engagement'] <=> (int) $a['engagement']);
+
+    return array_slice($posts, 0, $limit);
+}
+
+$ordered = topPosts([
+    ['id' => 'a', 'engagement' => 104],
+    ['id' => 'b', 'engagement' => 205],
+    ['id' => 'c', 'engagement' => 64],
+    ['id' => 'd', 'engagement' => 175],
+], 3);
+
+TestRunner::same('the best performing post comes first', 'b', $ordered[0]['id']);
+TestRunner::same('ordering is strictly descending', 'd', $ordered[1]['id']);
+TestRunner::same('the limit is applied after ordering', 3, count($ordered));
+TestRunner::same('the weakest post is dropped, not the newest', 'a', $ordered[2]['id']);
+TestRunner::same('an empty channel stays empty', 0, count(topPosts([], 10)));
+
 exit(TestRunner::summary());

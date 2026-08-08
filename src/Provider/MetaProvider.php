@@ -118,10 +118,18 @@ final class MetaProvider implements SocialProvider
 
     public function posts(string $since, string $until): array
     {
-        $edge   = $this->platform === 'instagram' ? 'media' : 'posts';
+        $edge = $this->platform === 'instagram' ? 'media' : 'posts';
+
+        // The two edges do not agree on how engagement is reported. Instagram
+        // media carry like_count and comments_count directly; Page posts carry
+        // neither, and the totals have to be requested as summaries. Asking a
+        // Page for like_count returns nothing and every row reads zero, which
+        // looks like a broken integration rather than the wrong field list.
         $fields = $this->platform === 'instagram'
             ? 'id,caption,permalink,timestamp,like_count,comments_count'
-            : 'id,message,permalink_url,created_time,shares';
+            : 'id,message,permalink_url,created_time,shares,'
+                . 'reactions.summary(total_count).limit(0),'
+                . 'comments.summary(total_count).limit(0)';
 
         $data = $this->get("/{$this->accountId}/{$edge}", [
             'fields' => $fields,
@@ -139,11 +147,35 @@ final class MetaProvider implements SocialProvider
                 'text'        => mb_substr((string) ($item['caption'] ?? $item['message'] ?? ''), 0, 160),
                 'url'         => (string) ($item['permalink'] ?? $item['permalink_url'] ?? ''),
                 'impressions' => 0,
-                'engagement'  => (int) ($item['like_count'] ?? 0) + (int) ($item['comments_count'] ?? 0),
+                'engagement'  => self::engagementOf($item),
             ];
         }
 
         return $posts;
+    }
+
+    /**
+     * Engagement for one item, whichever shape it arrived in.
+     *
+     * Instagram gives flat counts, a Page gives summary totals, and shares are
+     * a nested count that only Pages have. Anything missing counts as zero
+     * rather than being estimated from what is present.
+     *
+     * @param array<string,mixed> $item
+     */
+    private static function engagementOf(array $item): int
+    {
+        $likes = isset($item['like_count'])
+            ? (int) $item['like_count']
+            : (int) ($item['reactions']['summary']['total_count'] ?? 0);
+
+        $comments = isset($item['comments_count'])
+            ? (int) $item['comments_count']
+            : (int) ($item['comments']['summary']['total_count'] ?? 0);
+
+        $shares = (int) ($item['shares']['count'] ?? 0);
+
+        return $likes + $comments + $shares;
     }
 
     public function testConnection(): array
