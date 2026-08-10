@@ -28,6 +28,9 @@ final class DashboardPage
     /** Post lists are cached for an hour; refreshing is an explicit action. */
     private const POSTS_TRANSIENT = 'si_recent_posts';
 
+    /** Connection test results, kept just long enough to be shown once. */
+    private const TEST_TRANSIENT = 'si_connection_test';
+
     /** Enough to see what worked, short enough to read at a glance. */
     private const POSTS_SHOWN = 10;
 
@@ -99,6 +102,88 @@ final class DashboardPage
         Plugin::instance()->collect($day ?: null);
 
         wp_safe_redirect(add_query_arg('collected', '1', menu_page_url(self::SLUG, false)));
+        exit;
+    }
+
+    /**
+     * A date inside the quarter being reported on, or null for the current one.
+     */
+    private static function requestedQuarter(): ?string
+    {
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only.
+        $value = isset($_GET['quarter']) ? sanitize_text_field(wp_unslash($_GET['quarter'])) : '';
+
+        if (!preg_match('/^(\d{4})-Q([1-4])$/', $value, $matches)) {
+            return null;
+        }
+
+        $year  = (int) $matches[1];
+        $month = ((int) $matches[2] - 1) * 3 + 1;
+
+        return sprintf('%04d-%02d-15', $year, $month);
+    }
+
+    /**
+     * Quarters there is actually data for, newest first.
+     *
+     * Built from what was collected rather than from a fixed range, so the
+     * selector never offers a quarter that would come back empty.
+     *
+     * @return array<int,string>
+     */
+    private static function availableQuarters(): array
+    {
+        global $wpdb;
+
+        $rows = $wpdb->get_col(
+            'SELECT DISTINCT CONCAT(YEAR(captured_for), "-Q", QUARTER(captured_for))
+             FROM ' . Plugin::table() . '
+             ORDER BY MIN(captured_for) DESC'
+        );
+
+        $quarters = array_values(array_filter(array_map('strval', (array) $rows)));
+
+        $current = QuarterlyReport::quarterBounds();
+        $label   = str_replace(' ', '-', $current['label']);
+        $label   = preg_replace('/^Q(\d) (\d{4})$/', '$2-Q$1', $current['label']) ?: $label;
+
+        if (!in_array($label, $quarters, true)) {
+            array_unshift($quarters, $label);
+        }
+
+        rsort($quarters);
+
+        return $quarters;
+    }
+
+    /**
+     * Asks each channel whether it can actually be reached.
+     *
+     * The status cards say "configured", which only means an id and a token
+     * were typed in. Whether they work is a different question, and the answer
+     * used to arrive a day later as a failed collection nobody was watching.
+     * testConnection was implemented on both providers and called from
+     * nowhere.
+     */
+    public static function handleTest(): void
+    {
+        if (!current_user_can('edit_others_posts')) {
+            wp_die(esc_html__('You do not have permission to do that.', 'social-insights'));
+        }
+
+        check_admin_referer(self::NONCE . '_test');
+
+        $results = [];
+
+        foreach (Plugin::instance()->providers() as $provider) {
+            $results[$provider->key()] = $provider->isConfigured()
+                ? $provider->testConnection()
+                : ['ok' => false, 'message' => __('Not connected.', 'social-insights')];
+        }
+
+        set_transient(self::TEST_TRANSIENT, $results, 5 * MINUTE_IN_SECONDS);
+
+        wp_safe_redirect(add_query_arg('tested', '1', menu_page_url(self::SLUG, false)));
         exit;
     }
 
@@ -189,6 +274,175 @@ final class DashboardPage
     }
 
     /**
+     * Follower counts over the period, per channel.
+     *
+     * The figures were already being collected daily and shown as a single
+     * number at the end of the quarter, which answers "how many" and not "which
+     * way is this going". The second question is the one a quarterly report is
+     * written to answer.
+     */
+    private static function renderFollowers(string $start, string $end): void
+    {
+        global $wpdb;
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                'SELECT channel, captured_for, value
+                 FROM ' . Plugin::table() . "
+                 WHERE metric = 'followers' AND captured_for BETWEEN %s AND %s
+                 ORDER BY channel, captured_for",
+                $start,
+                $end
+            ),
+            ARRAY_A
+        );
+
+        $series = [];
+
+        foreach ((array) $rows as $row) {
+            $series[(string) $row['channel']][(string) $row['captured_for']] = (int) $row['value'];
+        }
+
+        if ($series === []) {
+            return;
+        }
+
+        printf('<h2 class="title">%s</h2>', esc_html__('Followers over the period', 'social-insights'));
+
+        foreach ($series as $channel => $points) {
+            if (count($points) < 2) {
+                printf(
+                    '<p class="description">%s</p>',
+                    esc_html(sprintf(
+                        /* translators: %s: channel name. */
+                        __('%s: not enough days collected yet to draw a line.', 'social-insights'),
+                        ucfirst((string) $channel)
+                    ))
+                );
+
+                continue;
+            }
+
+            $values = array_values($points);
+            $first  = (int) reset($values);
+            $last   = (int) end($values);
+
+            // The line is scaled between the lowest and highest value rather
+            // than from zero. Follower counts move by fractions of a percent,
+            // and a chart anchored at zero draws that as a flat line, which
+            // says "nothing happened" about a quarter where something did.
+            $low   = min($values);
+            $high  = max($values);
+            $range = max(1, $high - $low);
+
+            $width  = 640;
+            $height = 90;
+            $step   = $width / (count($values) - 1);
+
+            $points2 = [];
+
+            foreach ($values as $index => $value) {
+                $points2[] = round($index * $step, 1) . ','
+                    . round($height - ((($value - $low) / $range) * ($height - 10)) - 5, 1);
+            }
+
+            printf(
+                '<h3>%s</h3><p class="description">%s</p>',
+                esc_html(ucfirst((string) $channel)),
+                esc_html(sprintf(
+                    /* translators: 1: starting count, 2: ending count, 3: change. */
+                    __('%1$s to %2$s over the period, a change of %3$s.', 'social-insights'),
+                    number_format_i18n($first),
+                    number_format_i18n($last),
+                    ($last - $first >= 0 ? '+' : '') . number_format_i18n($last - $first)
+                ))
+            );
+
+            printf(
+                '<svg class="si-chart" viewBox="0 0 %1$d %2$d" role="img" aria-label="%3$s" preserveAspectRatio="none">'
+                    . '<polyline fill="none" stroke="#2271b1" stroke-width="2" points="%4$s" /></svg>',
+                $width,
+                $height,
+                esc_attr(sprintf(
+                    /* translators: 1: channel, 2: starting count, 3: ending count, 4: days. */
+                    __('%1$s followers went from %2$s to %3$s over %4$d recorded days.', 'social-insights'),
+                    ucfirst((string) $channel),
+                    number_format_i18n($first),
+                    number_format_i18n($last),
+                    count($values)
+                )),
+                esc_attr(implode(' ', $points2))
+            );
+        }
+    }
+
+    /**
+     * The report as CSV.
+     *
+     * The plain text block covers pasting into an email. A report that needs
+     * its own tables needs the numbers as numbers, and retyping them out of a
+     * textarea is how a figure ends up wrong in a published document.
+     */
+    public static function handleExport(): void
+    {
+        if (!current_user_can('edit_others_posts')) {
+            wp_die(esc_html__('You do not have permission to do that.', 'social-insights'));
+        }
+
+        check_admin_referer(self::NONCE . '_export');
+
+        $quarter = isset($_POST['quarter']) ? sanitize_text_field(wp_unslash($_POST['quarter'])) : '';
+        $inside  = null;
+
+        if (preg_match('/^(\d{4})-Q([1-4])$/', $quarter, $matches)) {
+            $inside = sprintf('%04d-%02d-15', (int) $matches[1], ((int) $matches[2] - 1) * 3 + 1);
+        }
+
+        $bounds   = QuarterlyReport::quarterBounds($inside);
+        $previous = QuarterlyReport::quarterBounds(gmdate('Y-m-d', strtotime($bounds['start'] . ' -1 day')));
+        $report   = QuarterlyReport::build($bounds['start'], $bounds['end'], $previous['start'], $previous['end']);
+
+        nocache_headers();
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="social-report-' . sanitize_file_name($bounds['label']) . '.csv"');
+
+        $out = fopen('php://output', 'w');
+
+        // Excel reads a UTF-8 file as Windows-1252 without this.
+        fwrite($out, "\xEF\xBB\xBF");
+
+        fputcsv($out, ['Channel', 'Metric', 'Total', 'Best day', 'Days with data', 'Change vs previous quarter (%)']);
+
+        foreach ($report['channels'] as $channel => $data) {
+            if ($data['followers'] !== null) {
+                fputcsv($out, [ucfirst((string) $channel), 'Followers at period end', $data['followers'], '', '', '']);
+            }
+
+            foreach ($data['metrics'] as $metric) {
+                $change = $report['comparison'][$channel][$metric['metric']]['change'] ?? '';
+
+                fputcsv($out, [
+                    ucfirst((string) $channel),
+                    $metric['label'],
+                    $metric['total'],
+                    $metric['peak'],
+                    $metric['days'],
+                    $change === '' ? '' : $change,
+                ]);
+            }
+        }
+
+        // The caveat travels with the file. Someone opening this in a
+        // spreadsheet will be tempted to sum the column, and the sum would be
+        // meaningless: the platforms do not count the same thing.
+        fputcsv($out, []);
+        fputcsv($out, ['Note', 'Figures are per platform and must not be added together, because each platform measures reach differently.']);
+
+        fclose($out);
+        exit;
+    }
+
+    /**
      * @param array<int,array{label:string,posts:array<int,array<string,mixed>>,error:?string}> $channels
      */
     private static function renderPosts(array $channels): void
@@ -263,7 +517,11 @@ final class DashboardPage
             wp_die(esc_html__('You do not have permission to open this page.', 'social-insights'));
         }
 
-        $bounds   = QuarterlyReport::quarterBounds();
+        // Which quarter is being looked at. Snapshots go back as far as
+        // collection has been running, and a report is asked for after the
+        // quarter ends, not during it, so being unable to look back was the
+        // first thing anyone would notice.
+        $bounds   = QuarterlyReport::quarterBounds(self::requestedQuarter());
         $previous = QuarterlyReport::quarterBounds(gmdate('Y-m-d', strtotime($bounds['start'] . ' -1 day')));
         $report   = QuarterlyReport::build($bounds['start'], $bounds['end'], $previous['start'], $previous['end']);
 
@@ -290,6 +548,23 @@ final class DashboardPage
                 __('Quarterly report: %s', 'social-insights'),
                 $bounds['label']
             )); ?></h2>
+
+            <form method="get" class="si-quarter">
+                <input type="hidden" name="page" value="<?php echo esc_attr(self::SLUG); ?>">
+                <label class="screen-reader-text" for="si-quarter"><?php esc_html_e('Reporting period', 'social-insights'); ?></label>
+                <select name="quarter" id="si-quarter">
+                    <?php
+                    $selected = preg_replace('/^Q(\d) (\d{4})$/', '$2-Q$1', $bounds['label']);
+
+                    foreach (self::availableQuarters() as $quarter) :
+                        ?>
+                        <option value="<?php echo esc_attr($quarter); ?>" <?php selected($selected, $quarter); ?>>
+                            <?php echo esc_html(preg_replace('/^(\d{4})-Q(\d)$/', 'Q$2 $1', $quarter)); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <button type="submit" class="button"><?php esc_html_e('Show', 'social-insights'); ?></button>
+            </form>
             <p class="description">
                 <?php echo esc_html(sprintf(
                     /* translators: 1: start date, 2: end date. */
@@ -300,6 +575,8 @@ final class DashboardPage
             </p>
 
             <?php self::renderReport($report); ?>
+
+            <?php self::renderFollowers($bounds['start'], $bounds['end']); ?>
 
             <h2 class="title"><?php esc_html_e('Posts in this quarter', 'social-insights'); ?></h2>
             <p class="description">
@@ -316,6 +593,14 @@ final class DashboardPage
             </form>
 
             <h2 class="title"><?php esc_html_e('Plain text version', 'social-insights'); ?></h2>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:0 0 8px">
+                <input type="hidden" name="action" value="si_export">
+                <input type="hidden" name="quarter" value="<?php echo esc_attr(preg_replace('/^Q(\d) (\d{4})$/', '$2-Q$1', $bounds['label'])); ?>">
+                <?php wp_nonce_field(self::NONCE . '_export'); ?>
+                <button type="submit" class="button"><?php esc_html_e('Download as CSV', 'social-insights'); ?></button>
+                <span class="description"><?php esc_html_e('The same figures as a spreadsheet, for a report that needs its own tables.', 'social-insights'); ?></span>
+            </form>
             <p class="description"><?php esc_html_e('Ready to paste into a document or an email.', 'social-insights'); ?></p>
             <textarea class="si-textreport" rows="16" readonly><?php
                 echo esc_textarea(QuarterlyReport::asText($report));
@@ -374,7 +659,28 @@ final class DashboardPage
             }
         }
 
+        $tested = get_transient(self::TEST_TRANSIENT);
+
+        if (is_array($tested)) {
+            foreach ($tested as $channel => $outcome) {
+                printf(
+                    '<div class="notice notice-%1$s inline"><p><strong>%2$s:</strong> %3$s</p></div>',
+                    esc_attr(!empty($outcome['ok']) ? 'success' : 'error'),
+                    esc_html(ucfirst((string) $channel)),
+                    esc_html((string) ($outcome['message'] ?? ''))
+                );
+            }
+
+            delete_transient(self::TEST_TRANSIENT);
+        }
+
         ?>
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:12px 0;display:inline-block">
+            <input type="hidden" name="action" value="si_test">
+            <?php wp_nonce_field(self::NONCE . '_test'); ?>
+            <button type="submit" class="button"><?php esc_html_e('Test connections', 'social-insights'); ?></button>
+        </form>
+
         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:12px 0">
             <input type="hidden" name="action" value="si_collect">
             <?php wp_nonce_field(self::NONCE . '_collect'); ?>

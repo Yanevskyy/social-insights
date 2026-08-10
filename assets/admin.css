@@ -87,3 +87,24 @@
     width: 120px;
     text-align: right;
 }
+
+/* Quarter selector, follower chart ---------------------------------------- */
+
+.si-quarter {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 8px 0 16px;
+}
+
+.si-chart {
+    display: block;
+    width: 100%;
+    max-width: 640px;
+    height: 90px;
+    margin: 6px 0 18px;
+    padding: 8px;
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+    background: #fff;
+}

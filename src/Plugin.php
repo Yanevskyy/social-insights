@@ -57,6 +57,8 @@ final class Plugin
         add_action('admin_post_si_save', [Admin\DashboardPage::class, 'handleSave']);
         add_action('admin_post_si_collect', [Admin\DashboardPage::class, 'handleCollect']);
         add_action('admin_post_si_refresh_posts', [Admin\DashboardPage::class, 'handleRefreshPosts']);
+        add_action('admin_post_si_test', [Admin\DashboardPage::class, 'handleTest']);
+        add_action('admin_post_si_export', [Admin\DashboardPage::class, 'handleExport']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue']);
 
         if (!wp_next_scheduled(self::CRON_HOOK)) {

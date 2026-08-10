@@ -412,4 +412,148 @@ TestRunner::same('a blank field keeps the stored token', 'old', cleanToken('', '
 TestRunner::same('a field of only whitespace keeps the stored token', 'old', cleanToken("   \n", 'old'));
 TestRunner::same('a real value replaces the stored one', 'new', cleanToken('new', 'old'));
 
+// ---------------------------------------------------------------------------
+// Quarter selection
+// ---------------------------------------------------------------------------
+
+TestRunner::group('Quarter selection');
+
+/**
+ * Mirrors DashboardPage::requestedQuarter. Anything that is not a real quarter
+ * falls back to the current one rather than being cleaned up and trusted.
+ */
+function quarterAnchor(string $value): ?string
+{
+    if (!preg_match('/^(\d{4})-Q([1-4])$/', $value, $matches)) {
+        return null;
+    }
+
+    return sprintf('%04d-%02d-15', (int) $matches[1], ((int) $matches[2] - 1) * 3 + 1);
+}
+
+TestRunner::same('Q1 anchors in January', '2026-01-15', quarterAnchor('2026-Q1'));
+TestRunner::same('Q3 anchors in July', '2026-07-15', quarterAnchor('2026-Q3'));
+TestRunner::same('Q4 anchors in October', '2026-10-15', quarterAnchor('2026-Q4'));
+TestRunner::same('a fifth quarter does not exist', null, quarterAnchor('2026-Q5'));
+TestRunner::same('a zero quarter does not exist', null, quarterAnchor('2026-Q0'));
+TestRunner::same('rubbish is refused', null, quarterAnchor('drop table'));
+TestRunner::same('an empty value is refused', null, quarterAnchor(''));
+
+// ---------------------------------------------------------------------------
+// Follower chart scaling
+// ---------------------------------------------------------------------------
+
+TestRunner::group('Follower chart');
+
+/**
+ * The line is scaled between the lowest and highest value, not from zero.
+ * Follower counts move by fractions of a percent, and a chart anchored at zero
+ * draws that as a flat line, which says nothing happened about a quarter where
+ * something did.
+ *
+ * @param array<int,int> $values
+ * @return array<int,float>
+ */
+function chartRow(array $values, int $height = 90): array
+{
+    $low   = min($values);
+    $high  = max($values);
+    $range = max(1, $high - $low);
+
+    return array_map(
+        static fn(int $value): float => round($height - ((($value - $low) / $range) * ($height - 10)) - 5, 1),
+        $values
+    );
+}
+
+$line = chartRow([2100, 2140, 2184]);
+
+TestRunner::same('the lowest point sits at the bottom', 85.0, $line[0]);
+TestRunner::same('the highest point sits at the top', 5.0, $line[2]);
+TestRunner::assert('the middle point sits between them', $line[1] < $line[0] && $line[1] > $line[2]);
+
+TestRunner::assert(
+    'a flat series does not divide by zero',
+    (static function (): bool {
+        foreach (chartRow([1500, 1500, 1500]) as $y) {
+            if (!is_finite($y)) {
+                return false;
+            }
+        }
+
+        return true;
+    })()
+);
+
+TestRunner::assert(
+    'a small change is still visible',
+    // Scaling from zero would put 2100 and 2184 within one pixel of each other.
+    abs(chartRow([2100, 2184])[0] - chartRow([2100, 2184])[1]) > 50
+);
+
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+
+TestRunner::group('CSV export');
+
+/**
+ * @param array<string,mixed> $report
+ * @return array<int,array<int,string|int|float>>
+ */
+function exportRows(array $report): array
+{
+    $rows = [['Channel', 'Metric', 'Total', 'Best day', 'Days with data', 'Change vs previous quarter (%)']];
+
+    foreach ($report['channels'] as $channel => $data) {
+        if ($data['followers'] !== null) {
+            $rows[] = [ucfirst((string) $channel), 'Followers at period end', $data['followers'], '', '', ''];
+        }
+
+        foreach ($data['metrics'] as $metric) {
+            $rows[] = [
+                ucfirst((string) $channel),
+                $metric['label'],
+                $metric['total'],
+                $metric['peak'],
+                $metric['days'],
+                $report['comparison'][$channel][$metric['metric']]['change'] ?? '',
+            ];
+        }
+    }
+
+    return $rows;
+}
+
+$report = [
+    'channels' => [
+        'facebook' => [
+            'followers' => 3427,
+            'metrics'   => [
+                ['metric' => 'reach', 'label' => 'Reach', 'total' => 12000, 'peak' => 900, 'days' => 34],
+            ],
+        ],
+        'instagram' => [
+            'followers' => null,
+            'metrics'   => [
+                ['metric' => 'reach', 'label' => 'Reach', 'total' => 8000, 'peak' => 600, 'days' => 34],
+            ],
+        ],
+    ],
+    'comparison' => ['facebook' => ['reach' => ['previous' => 9000, 'change' => 33.3]]],
+];
+
+$rows = exportRows($report);
+
+TestRunner::same('header plus a row per figure', 4, count($rows));
+TestRunner::same('followers are reported where known', 3427, $rows[1][2]);
+TestRunner::same('the change column is filled where there is a comparison', 33.3, $rows[2][5]);
+TestRunner::same('and left blank where there is none', '', $rows[3][5]);
+
+TestRunner::assert(
+    'a channel with no follower figure is not given one',
+    // Two rows for facebook (followers + reach), one for instagram (reach).
+    count(array_filter($rows, static fn(array $r): bool => $r[0] === 'Instagram')) === 1
+);
+
 exit(TestRunner::summary());
