@@ -415,19 +415,28 @@ final class DashboardPage
 
         foreach ($report['channels'] as $channel => $data) {
             if ($data['followers'] !== null) {
-                fputcsv($out, [ucfirst((string) $channel), 'Followers at period end', $data['followers'], '', '', '']);
+                fputcsv($out, [
+                    self::csvCell(ucfirst((string) $channel)),
+                    'Followers at period end',
+                    (int) $data['followers'],
+                    '',
+                    '',
+                    '',
+                ]);
             }
 
             foreach ($data['metrics'] as $metric) {
                 $change = $report['comparison'][$channel][$metric['metric']]['change'] ?? '';
 
                 fputcsv($out, [
-                    ucfirst((string) $channel),
-                    $metric['label'],
-                    $metric['total'],
-                    $metric['peak'],
-                    $metric['days'],
-                    $change === '' ? '' : $change,
+                    self::csvCell(ucfirst((string) $channel)),
+                    // The label is whatever the platform called the metric, so
+                    // it is their text in our spreadsheet.
+                    self::csvCell((string) $metric['label']),
+                    (int) $metric['total'],
+                    (int) $metric['peak'],
+                    (int) $metric['days'],
+                    $change === '' ? '' : (float) $change,
                 ]);
             }
         }
@@ -440,6 +449,31 @@ final class DashboardPage
 
         fclose($out);
         exit;
+    }
+
+    /**
+     * Neutralises a value a spreadsheet would treat as a formula.
+     *
+     * A cell starting with =, +, - or @ is executed rather than shown. The
+     * metric labels in this file are not ours: they are whatever Meta or
+     * LinkedIn called the figure, arriving over an API we do not control, and
+     * stored months ago. Numbers are cast rather than escaped, so the columns
+     * anyone would actually sum stay numeric.
+     */
+    private static function csvCell(string $value): string
+    {
+        $value = (string) preg_replace('/[\r\n\t]+/', ' ', $value);
+
+        // Trimmed before the first character is judged. A tab in front of a
+        // formula becomes a space, and a check on the raw first byte would
+        // wave it through for the spreadsheet to trim back into a formula.
+        $value = ltrim($value);
+
+        if ($value === '') {
+            return $value;
+        }
+
+        return in_array($value[0], ['=', '+', '-', '@'], true) ? "'" . $value : $value;
     }
 
     /**
