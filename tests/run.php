@@ -306,4 +306,110 @@ TestRunner::same('the limit is applied after ordering', 3, count($ordered));
 TestRunner::same('the weakest post is dropped, not the newest', 'a', $ordered[2]['id']);
 TestRunner::same('an empty channel stays empty', 0, count(topPosts([], 10)));
 
+// ---------------------------------------------------------------------------
+// Token storage
+// ---------------------------------------------------------------------------
+
+TestRunner::group('Token encryption');
+
+$available = function_exists('sodium_crypto_secretbox');
+
+// libsodium has shipped in PHP core since 7.2, and this plugin requires 8.4.
+// The guard exists so the suite reports the situation rather than fataling on
+// an unusual build.
+TestRunner::assert('libsodium is available', $available);
+
+if ($available) {
+    $key = hash('sha256', 'social-insights|test-auth-key', true);
+
+    $encrypt = static function (string $value) use ($key): string {
+        if ($value === '') {
+            return $value;
+        }
+
+        $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+
+        return 'sisec1:' . base64_encode($nonce . sodium_crypto_secretbox($value, $nonce, $key));
+    };
+
+    $decrypt = static function (string $stored) use ($key): string {
+        if ($stored === '' || !str_starts_with($stored, 'sisec1:')) {
+            return $stored;
+        }
+
+        $raw = base64_decode(substr($stored, 7), true);
+
+        if ($raw === false || strlen($raw) <= SODIUM_CRYPTO_SECRETBOX_NONCEBYTES) {
+            return '';
+        }
+
+        $plain = sodium_crypto_secretbox_open(
+            substr($raw, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES),
+            substr($raw, 0, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES),
+            $key
+        );
+
+        return $plain === false ? '' : $plain;
+    };
+
+    $token  = 'EAABsbCS1iHgBO7ZC0000000000000000';
+    $cipher = $encrypt($token);
+
+    TestRunner::assert('the stored value is marked as encrypted', str_starts_with($cipher, 'sisec1:'));
+    TestRunner::assert('the token is not readable in storage', !str_contains($cipher, 'EAABsbCS'));
+    TestRunner::same('it decrypts back to the original', $token, $decrypt($cipher));
+
+    TestRunner::assert(
+        'encrypting twice gives different ciphertext',
+        $encrypt($token) !== $encrypt($token)
+    );
+
+    TestRunner::same(
+        'a value saved before encryption still reads',
+        'plain-old-token',
+        $decrypt('plain-old-token')
+    );
+
+    TestRunner::same('an empty token stays empty', '', $encrypt(''));
+
+    TestRunner::same(
+        'a token encrypted under different keys does not decrypt',
+        '',
+        (static function () use ($decrypt): string {
+            $otherKey = hash('sha256', 'social-insights|rotated-salts', true);
+            $nonce    = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+            $cipher   = 'sisec1:' . base64_encode(
+                $nonce . sodium_crypto_secretbox('secret', $nonce, $otherKey)
+            );
+
+            // Rotated salts must read as "not connected", not as a corrupt
+            // token producing a baffling error from the API.
+            return $decrypt($cipher);
+        })()
+    );
+
+    TestRunner::same('a truncated stored value fails closed', '', $decrypt('sisec1:aGk='));
+    TestRunner::same('rubbish in the stored value fails closed', '', $decrypt('sisec1:!!!not-base64!!!'));
+}
+
+TestRunner::group('Token input');
+
+/**
+ * A token pasted from a developer console arrives with whitespace more often
+ * than not, and the API then rejects it with a message about the token being
+ * invalid, which sends the administrator looking for the wrong problem.
+ */
+function cleanToken(string $submitted, string $stored): string
+{
+    $value = trim($submitted);
+
+    return $value !== '' ? $value : $stored;
+}
+
+TestRunner::same('a trailing newline is removed', 'abc123', cleanToken("abc123\n", 'old'));
+TestRunner::same('surrounding spaces are removed', 'abc123', cleanToken('  abc123  ', 'old'));
+TestRunner::same('a blank field keeps the stored token', 'old', cleanToken('', 'old'));
+TestRunner::same('a field of only whitespace keeps the stored token', 'old', cleanToken("   \n", 'old'));
+TestRunner::same('a real value replaces the stored one', 'new', cleanToken('new', 'old'));
+
 exit(TestRunner::summary());

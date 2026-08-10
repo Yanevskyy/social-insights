@@ -74,6 +74,46 @@ final class Plugin
         if (get_option('si_db_version') !== VERSION) {
             self::install();
         }
+
+        self::encryptStoredTokens();
+    }
+
+    /**
+     * Encrypts tokens that were saved before encryption existed.
+     *
+     * Without this, an existing site keeps its tokens in plain text until
+     * somebody happens to re-save the settings, which on a working
+     * installation is never. The upgrade would be real for new sites and
+     * cosmetic for the ones that already have something worth protecting.
+     *
+     * Runs once, guarded by an option, and is a no-op when there is nothing
+     * left to convert.
+     */
+    private static function encryptStoredTokens(): void
+    {
+        if (get_option('si_tokens_encrypted') === VERSION || !Secret::available()) {
+            return;
+        }
+
+        $settings = self::settings();
+        $changed  = false;
+
+        foreach (['instagram_token', 'facebook_token', 'linkedin_token'] as $field) {
+            $value = (string) ($settings[$field] ?? '');
+
+            if ($value === '' || Secret::isEncrypted($value)) {
+                continue;
+            }
+
+            $settings[$field] = Secret::encrypt($value);
+            $changed          = true;
+        }
+
+        if ($changed) {
+            update_option(self::OPTION_SETTINGS, $settings, false);
+        }
+
+        update_option('si_tokens_encrypted', VERSION, false);
     }
 
     public static function install(): void
@@ -115,6 +155,19 @@ final class Plugin
     }
 
     /**
+     * A stored token, decrypted for use.
+     *
+     * Every read of a token goes through here, so nothing else in the plugin
+     * needs to know the values are encrypted at rest.
+     */
+    public static function token(string $field): string
+    {
+        $settings = self::settings();
+
+        return Secret::decrypt((string) ($settings[$field] ?? ''));
+    }
+
+    /**
      * @return array<int,SocialProvider>
      */
     public function providers(): array
@@ -125,18 +178,18 @@ final class Plugin
             new MetaProvider(
                 'instagram',
                 (string) ($settings['instagram_id'] ?? ''),
-                (string) ($settings['instagram_token'] ?? ''),
+                self::token('instagram_token'),
                 (string) ($settings['graph_endpoint'] ?? '')
             ),
             new MetaProvider(
                 'facebook',
                 (string) ($settings['facebook_id'] ?? ''),
-                (string) ($settings['facebook_token'] ?? ''),
+                self::token('facebook_token'),
                 (string) ($settings['graph_endpoint'] ?? '')
             ),
             new LinkedInProvider(
                 (string) ($settings['linkedin_id'] ?? ''),
-                (string) ($settings['linkedin_token'] ?? ''),
+                self::token('linkedin_token'),
                 (string) ($settings['linkedin_endpoint'] ?? '')
             ),
         ];

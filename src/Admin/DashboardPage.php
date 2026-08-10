@@ -14,6 +14,7 @@ declare(strict_types=1);
 namespace ClarityWeb\SocialInsights\Admin;
 
 use ClarityWeb\SocialInsights\Plugin;
+use ClarityWeb\SocialInsights\Secret;
 use ClarityWeb\SocialInsights\Provider\ProviderUnavailable;
 use ClarityWeb\SocialInsights\Report\QuarterlyReport;
 
@@ -62,8 +63,21 @@ final class DashboardPage
         // A blank token field keeps the stored one. Otherwise saving an
         // unrelated field would silently disconnect a channel.
         foreach (['instagram_token', 'facebook_token', 'linkedin_token'] as $field) {
-            $value = (string) ($post[$field] ?? '');
-            $settings[$field] = $value !== '' ? $value : (string) ($existing[$field] ?? '');
+            // Trimmed before anything else. A token copied out of a developer
+            // console arrives with a trailing newline more often than not, and
+            // the API rejects it with a message about the token being invalid,
+            // which sends the administrator looking for the wrong problem.
+            $value = trim((string) ($post[$field] ?? ''));
+
+            if ($value === '') {
+                // Carried over as stored, still encrypted. Decrypting and
+                // re-encrypting would churn the value for no reason.
+                $settings[$field] = (string) ($existing[$field] ?? '');
+
+                continue;
+            }
+
+            $settings[$field] = Secret::encrypt($value);
         }
 
         update_option(Plugin::OPTION_SETTINGS, $settings, false);
@@ -469,6 +483,19 @@ final class DashboardPage
 
         ?>
         <h2 class="title"><?php esc_html_e('Channels', 'social-insights'); ?></h2>
+
+        <?php if (Secret::available()) : ?>
+            <p class="description">
+                <?php esc_html_e('Tokens are encrypted before they are stored, so a database backup does not carry working credentials. Rotating the site security keys in wp-config makes stored tokens unreadable and the channels have to be reconnected.', 'social-insights'); ?>
+            </p>
+        <?php else : ?>
+            <div class="notice notice-warning inline">
+                <p>
+                    <?php esc_html_e('This server has no libsodium, so tokens are stored as plain text. Anyone with a copy of the database, including any backup, has working access to these accounts. Ask the host to enable the sodium extension.', 'social-insights'); ?>
+                </p>
+            </div>
+        <?php endif; ?>
+
         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
             <input type="hidden" name="action" value="si_save">
             <?php wp_nonce_field(self::NONCE); ?>
